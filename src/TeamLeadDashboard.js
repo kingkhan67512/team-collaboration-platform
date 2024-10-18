@@ -1,52 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth } from './firebase';
-import { collection, query, where, onSnapshot, updateDoc, doc, getDocs } from 'firebase/firestore'; // Import necessary Firestore functions
+import { collection, query, where, onSnapshot, updateDoc, doc, getDocs, arrayUnion, arrayRemove } from 'firebase/firestore';
+import AssignTask from './components/AssignTask'; // Import the AssignTask component
 
 const TeamLeadDashboard = () => {
   const [workspaces, setWorkspaces] = useState([]);
-  const [allUsers, setAllUsers] = useState([]); // Store all users for member assignment
+  const [allMembers, setAllMembers] = useState([]); // Store only team members for assignment
   const userId = auth.currentUser ? auth.currentUser.uid : null;
   const [selectedMembers, setSelectedMembers] = useState({}); // Track selected members for each workspace
-  
-  useEffect(() => {
-    if (!userId) return;
-  
-    // Log Firestore data fetched for debugging
-    const q = query(collection(db, 'workspaces'), where('members', 'array-contains', userId));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const workspaceList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      
-      console.log("Fetched workspaces:", workspaceList); // Log workspaces to verify data
-      setWorkspaces(workspaceList); // Update state with fetched workspaces
-    });
-  
-    return () => unsubscribe();
-  }, [userId]);
-  
+  const [selectedMemberId, setSelectedMemberId] = useState(null); // Store the selected member's ID
 
-  useEffect(() => {
-    if (!userId) {
-      console.log("No userId found! The user might not be logged in.");
-      return;
-    }
-  
-    console.log("Logged in userId:", userId); // Log the userId to ensure it's fetched
-    const q = query(collection(db, 'workspaces'), where('members', 'array-contains', userId));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const workspaceList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      console.log("Fetched workspaces:", workspaceList); // Log the fetched workspaces
-      setWorkspaces(workspaceList);
-    });
-  
-    return () => unsubscribe();
-  }, [userId]);
-  
   useEffect(() => {
     if (!userId) return;
 
@@ -58,13 +21,20 @@ const TeamLeadDashboard = () => {
         ...doc.data(),
       }));
       setWorkspaces(workspaceList);
+
+      // Fetch selected members for each workspace
+      const newSelectedMembers = {};
+      workspaceList.forEach(workspace => {
+        newSelectedMembers[workspace.id] = workspace.members.filter(member => member !== userId);
+      });
+      setSelectedMembers(newSelectedMembers); // Store assigned members for checkboxes
     });
 
     // Cleanup listener on unmount
     return () => unsubscribe();
   }, [userId]);
 
-  // Fetch all users to assign members
+  // Fetch all users and filter to include only team members
   useEffect(() => {
     const fetchUsers = async () => {
       const usersCollection = collection(db, 'users');
@@ -73,7 +43,10 @@ const TeamLeadDashboard = () => {
         id: doc.id,
         ...doc.data(),
       }));
-      setAllUsers(usersList);
+
+      // Filter to include only team members
+      const teamMembers = usersList.filter(user => user.role === 'teamMember');
+      setAllMembers(teamMembers); // Store only team members
     };
     fetchUsers();
   }, []);
@@ -92,11 +65,15 @@ const TeamLeadDashboard = () => {
   };
 
   // Handle assigning members to the workspace
-  const handleMemberAssign = async (workspaceId, members) => {
+  const handleMemberAssign = async (workspaceId) => {
     const workspaceDocRef = doc(db, 'workspaces', workspaceId);
 
     try {
-      await updateDoc(workspaceDocRef, { members });
+      // Add the selected members to the existing 'members' array using arrayUnion
+      await updateDoc(workspaceDocRef, {
+        members: arrayUnion(...selectedMembers[workspaceId], userId) // Ensure the team lead's UID stays in the members array
+      });
+
       alert('Members assigned successfully!');
     } catch (error) {
       console.error('Error assigning members:', error);
@@ -109,9 +86,32 @@ const TeamLeadDashboard = () => {
     setSelectedMembers((prev) => ({
       ...prev,
       [workspaceId]: prev[workspaceId]
-        ? [...prev[workspaceId], memberId]
+        ? prev[workspaceId].includes(memberId)
+          ? prev[workspaceId].filter(id => id !== memberId) // Uncheck if already selected
+          : [...prev[workspaceId], memberId] // Check if not selected
         : [memberId],
     }));
+    setSelectedMemberId(memberId); // Update selected member ID
+  };
+
+  // Handle removing members from the workspace
+  const handleMemberRemove = async (workspaceId) => {
+    const workspaceDocRef = doc(db, 'workspaces', workspaceId);
+
+    try {
+      await updateDoc(workspaceDocRef, {
+        members: arrayRemove(...selectedMembers[workspaceId]) // Remove selected members
+      });
+      setSelectedMembers((prev) => ({
+        ...prev,
+        [workspaceId]: [], // Reset selected members
+      }));
+
+      alert('Members removed successfully!');
+    } catch (error) {
+      console.error('Error removing members:', error);
+      alert('Failed to remove members. Please try again.');
+    }
   };
 
   return (
@@ -131,6 +131,7 @@ const TeamLeadDashboard = () => {
               value={workspace.status}
               onChange={(e) => handleStatusChange(workspace.id, e.target.value)}
             >
+              <option value="Pending">Pending</option>
               <option value="Active">Active</option>
               <option value="In Progress">In Progress</option>
               <option value="Completed">Completed</option>
@@ -139,12 +140,13 @@ const TeamLeadDashboard = () => {
             {/* Members Assignment */}
             <h6>Assign Members:</h6>
             <div className="mb-3">
-              {allUsers.map(user => (
+              {allMembers.map(user => (
                 <div key={user.id} className="form-check">
                   <input
                     type="checkbox"
                     className="form-check-input"
                     id={`member-${workspace.id}-${user.id}`}
+                    checked={selectedMembers[workspace.id]?.includes(user.id) || false} // Keep checkbox checked based on selection
                     onChange={() => handleMemberSelection(workspace.id, user.id)}
                   />
                   <label
@@ -158,11 +160,23 @@ const TeamLeadDashboard = () => {
             </div>
 
             <button
-              className="btn btn-primary"
-              onClick={() => handleMemberAssign(workspace.id, selectedMembers[workspace.id] || [])}
+              className="btn btn-primary mb-2"
+              onClick={() => handleMemberAssign(workspace.id)}
             >
               Assign Members
             </button>
+            {/* Button to Remove Selected Members */}
+            <button
+              className="btn btn-danger"
+              onClick={() => handleMemberRemove(workspace.id)}
+            >
+              Remove Selected Members
+            </button>
+
+            {/* Assign Task to Selected Member */}
+            {selectedMemberId && (
+              <AssignTask selectedMemberId={selectedMemberId} workspaceId={workspace.id} />
+            )}
           </li>
         ))}
       </ul>
